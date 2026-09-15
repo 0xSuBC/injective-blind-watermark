@@ -158,7 +158,7 @@ python cli.py verify --help
 ## 📁 项目结构
 
 ```
-INJ_Watermark/
+injective-blind-watermark/
 ├── cli.py                    # 命令行入口
 ├── requirements.txt          # Python 依赖
 ├── .env.example              # 环境变量模板（复制为 .env 用）
