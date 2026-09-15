@@ -1,0 +1,61 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# --- Virtual Envs ---
+venv/
+env/
+ENV/
+.venv/
+
+# --- Environment & Secrets ---
+.env
+.env.local
+*.pem
+*.key
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- macOS ---
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# --- Rust / CosmWasm ---
+contracts/*/target/
+contracts/target/
+*.wasm
+Cargo.lock.bak
+
+# --- Project local ---
+.local_chain_db.json
+examples/output/*.jpg
+examples/output/*.jpeg
+examples/output/*.png
+!examples/output/original_demo.jpg
+examples/output/*.record.json

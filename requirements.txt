@@ -1,0 +1,7 @@
+numpy>=1.17.0
+opencv-python
+PyWavelets
+setuptools
+injective-py>=1.0.0
+cosmospy>=6.0.0
+httpx>=0.24.0
