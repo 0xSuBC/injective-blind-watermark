@@ -26,12 +26,12 @@ INJ Watermark 一键 CLI
   # 5) 列出本地所有模拟链存证
   python cli.py list --mode local
 
-  # 6) 使用真实 INJ Testnet (需要合约地址 + 助记词)
+  # 6) 使用真实 INJ Testnet (需要合约地址 + 助记词或私钥)
   python cli.py register --img a.jpg --output b.jpg \\
       --owner inj1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \\
       --mode testnet \\
-      --contract <部署后的合约地址> \\
-      --mnemonic "word1 word2 word3 word4 word5 word6 word7 word8 word9 word10 word11 word12" \\
+      --contract <部署后的合约地址, 例如 inj1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx> \\
+      --mnemonic "<你的 12 词 BIP-39 助记词>" \\
       --title "测试" --author "Me"
 """
 import os
@@ -286,7 +286,7 @@ def build_parser():
     pr.add_argument("--title", default=None, help="作品标题 (元数据)")
     pr.add_argument("--author", default=None, help="作者 (元数据)")
     pr.add_argument("--license", default=None, help="授权协议 (元数据)")
-    pr.add_argument("--extra-meta", default=None, help='额外元数据 (JSON 字符串)，如 \'{"tags":["a","b"]}\'')
+    pr.add_argument("--extra-meta", default=None, help='额外元数据 (JSON 字符串)，例如 \'{"tags":["a","b"]}\'')
     pr.add_argument("--gas", type=int, default=400_000, help="真实链广播 gas 上限 (默认 400000)")
     pr.set_defaults(func=cmd_register)
 

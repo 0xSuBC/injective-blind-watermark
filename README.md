@@ -31,10 +31,10 @@ pip install -r requirements.txt
 
 ```bash
 cp .env.example .env
-# 然后编辑 .env，填入你的助记词和地址
+# 然后编辑 .env，填入你的助记词或私钥 + 地址
 ```
 
-> ⚠️ **安全提醒**：`.env` 已加入 `.gitignore`，**绝对不要**把助记词提交到 GitHub！
+> ⚠️ **安全提醒**：`.env` 已加入 `.gitignore`，**绝对不要**把助记词或私钥提交到 GitHub！
 
 ---
 
@@ -48,7 +48,7 @@ cp .env.example .env
 python cli.py register \
   --img examples/output/original_demo.jpg \
   --output examples/output/wm_local_demo.jpg \
-  --owner inj1vxzhfrngdyu9cwhfnf7l4cck95fd98l9chtydc \
+  --owner <你的 inj 地址, 例如 inj1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx> \
   --title "我的第一张测试图" \
   --author "张三" \
   --license "CC BY-NC-SA 4.0" \
@@ -90,8 +90,8 @@ python cli.py verify \
 ### 前置条件
 
 1. **领测试网 INJ**：访问 https://injhub.com/faucet ，输入你的 inj 地址领水
-2. **配置 `.env`**：填入助记词和地址
-3. **合约地址**（已部署）：`inj1d8pg0hrlesr8k503j36nqvvcg954ya5mfdf9em`
+2. **配置 `.env`**：填入助记词或私钥 + 地址
+3. **合约地址**（如使用已部署示例）：`<你部署的合约地址, 例如 inj1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx>`
 
 ### Step 1 — 注册版权上链
 
@@ -104,8 +104,8 @@ python cli.py register \
   --author "张三" \
   --license "CC BY-NC-SA 4.0" \
   --mode testnet \
-  --contract inj1d8pg0hrlesr8k503j36nqvvcg954ya5mfdf9em \
-  --mnemonic "$(grep MNEMONIC .env | cut -d'"' -f2)"
+  --contract $(grep CONTRACT_ADDRESS .env | cut -d'"' -f2) \
+  --privkey-hex "$(grep PRIVATE_KEY_HEX .env | cut -d'"' -f2)"
 ```
 
 ### Step 2 — 从链上查询记录
@@ -113,7 +113,7 @@ python cli.py register \
 ```bash
 python cli.py query \
   --copyright-id INJ-CPR-xxxxxxxx \
-  --contract inj1d8pg0hrlesr8k503j36nqvvcg954ya5mfdf9em
+  --contract $(grep CONTRACT_ADDRESS .env | cut -d'"' -f2)
 ```
 
 ### Step 3 — 完整验证（水印提取 + 链上比对）
@@ -123,15 +123,15 @@ python cli.py verify \
   --img examples/output/wm_on_chain_demo.jpg \
   --copyright-id INJ-CPR-xxxxxxxx \
   --mode testnet \
-  --contract inj1d8pg0hrlesr8k503j36nqvvcg954ya5mfdf9em
+  --contract $(grep CONTRACT_ADDRESS .env | cut -d'"' -f2)
 ```
 
 ### Step 4 — 查看某地址所有版权
 
 ```bash
 python cli.py list-by-owner \
-  --owner inj1vxzhfrngdyu9cwhfnf7l4cck95fd98l9chtydc \
-  --contract inj1d8pg0hrlesr8k503j36nqvvcg954ya5mfdf9em
+  --owner <要查询的 inj 地址, 例如 inj1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx> \
+  --contract $(grep CONTRACT_ADDRESS .env | cut -d'"' -f2)
 ```
 
 ---
