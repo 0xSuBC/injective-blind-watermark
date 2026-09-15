@@ -89,7 +89,7 @@ python cli.py verify \
 
 ### 前置条件
 
-1. **领测试网 INJ**：访问 https://injhub.com/faucet ，输入你的 inj 地址领水
+1. **领测试网 INJ**：访问 https://testnet.faucet.injective.network ，输入你的 inj 地址领水
 2. **配置 `.env`**：填入助记词或私钥 + 地址
 3. **合约地址**（如使用已部署示例）：`<你部署的合约地址, 例如 inj1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx>`
 
