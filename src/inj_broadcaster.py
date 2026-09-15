@@ -1,57 +1,80 @@
 """
 Injective 链上真实广播服务
-使用 cosmospy + httpx 完成:
-  - 构建 MsgExecuteContract
-  - 签名 (secp256k1, amino-json 兼容 Cosmos SDK)
-  - 通过 LCD REST (sync/async) 广播
-  - 查询交易回执 & 合约状态
-
-注：injective-py SDK 接口版本众多，这里直接用底层通用方式，兼容性最强。
+完全对齐 pyinjective 官方 SDK 行为：
+  - 地址派生：keccak256(uncompressed_pubkey[64B, no 04 prefix])[-20:] → bech32 inj
+  - 公钥类型：injective.crypto.v1beta1.ethsecp256k1.PubKey (key 字段 = 0x04||X||Y 完整 65B)
+  - 签名流程：SignDoc Protobuf(SerializeToString) → keccak_256 → ECDSA secp256k1 deterministic
+  - 广播: tx_raw_bytes = TxRaw.SerializeToString(), POST /cosmos/tx/v1beta1/txs
 """
 import hashlib
 import json
 import base64
 import time
 import os
-from typing import Optional, Dict, Any, Tuple, List
+from typing import Optional, Dict, Any, List
 
 from bech32 import bech32_encode, convertbits
-import ecdsa
+from Crypto.Hash import keccak as _keccak_mod
 import httpx
 
+# ========== 直接复用 pyinjective 官方生成的 pb2 类（保证 100% 与链兼容） ==========
+from google.protobuf import any_pb2
+from pyinjective.proto.cosmos.base.v1beta1.coin_pb2 import Coin
+from pyinjective.proto.cosmos.tx.signing.v1beta1 import signing_pb2 as _tx_sign
+from pyinjective.proto.cosmos.tx.v1beta1 import tx_pb2 as _cosmos_tx
+from pyinjective.proto.injective.crypto.v1beta1.ethsecp256k1.keys_pb2 import PubKey as EthSecp256k1PubKey
 
-# ========== 加密工具 ==========
+SIGN_MODE_DIRECT = _tx_sign.SIGN_MODE_DIRECT
+
+
+def _keccak256(data: bytes) -> bytes:
+    kh = _keccak_mod.new(digest_bits=256)
+    kh.update(data)
+    return kh.digest()
+
+
+# ========== 加密工具（与 pyinjective.wallet 逐行对齐） ==========
 
 def mnemonic_to_private_key(mnemonic: str) -> bytes:
-    """BIP-39/44 简化：直接从 mnemonic seed 派生出 secp256k1 私钥
-    (使用 hdwallets + mnemonic 库，它们在 injective-py 依赖链中)
-    """
-    import mnemonic as mnemo
-    from hdwallets import BIP32
-    if not mnemo.Mnemonic('english').check(mnemonic):
-        raise ValueError("助记词校验失败")
-    seed = mnemo.Mnemonic.to_seed(mnemonic, passphrase='')
-    bip32 = BIP32.from_seed(seed)
-    # Cosmos 标准路径: m/44'/118'/0'/0/0 (Injective 兼容)
-    child = bip32.get_child_for_path("m/44'/118'/0'/0/0")
-    return child.private_key
+    """BIP-39/44: 从 mnemonic 派生出 secp256k1 私钥，使用 pyinjective 官方实现"""
+    from pyinjective.wallet import PrivateKey as _Priv
+    official_pk = _Priv.from_mnemonic(mnemonic)
+    # PrivateKey 没有直接暴露 bytes，但能从 hex 还原
+    return bytes.fromhex(official_pk.to_hex())
 
 
 def privkey_to_inj_address(privkey_bytes: bytes) -> str:
-    """secp256k1 私钥 -> inj1... bech32 地址"""
+    """secp256k1 私钥 → inj1... bech32 地址
+    与 pyinjective PublicKey.to_address 完全一致：
+      pubkey = vk.to_string("uncompressed")  # 65 bytes (04||X||Y)
+      raw20 = keccak256(pubkey[1:])[12:]  # 去掉 04 前缀的 64B → keccak256 → 末 20B
+    """
     from ecdsa import SigningKey, SECP256k1
-    sk = SigningKey.from_string(privkey_bytes, curve=SECP256k1)
+    sk = SigningKey.from_string(privkey_bytes, curve=SECP256k1, hashfunc=hashlib.sha256)
     vk = sk.get_verifying_key()
-    pub_bytes = vk.to_string()  # 64 bytes (uncompressed, no prefix)
-    # Cosmos 取 sha256 → ripemd160 的前 20 bytes 当地址
-    sha = hashlib.sha256(pub_bytes).digest()
-    # ripemd160 via hashlib.new
-    rip = hashlib.new('ripemd160')
-    rip.update(sha)
-    raw20 = rip.digest()
-    # bech32 编码: 5 bits per char
+    pubkey_65B = vk.to_string("uncompressed")  # 04 || X || Y
+    raw20 = _keccak256(pubkey_65B[1:])[12:]
     bits = convertbits(list(raw20), 8, 5, True)
     return bech32_encode('inj', bits)
+
+
+def _pubkey_to_ethsecp_proto_bytes(privkey_bytes: bytes) -> bytes:
+    """私钥 → EthSecp256k1PubKey.SerializeToString()
+    key 字段 = 完整 uncompressed 65-byte pubkey (0x04 prefix)
+    """
+    from ecdsa import SigningKey, SECP256k1
+    sk = SigningKey.from_string(privkey_bytes, curve=SECP256k1, hashfunc=hashlib.sha256)
+    vk = sk.get_verifying_key()
+    pubkey_65B = vk.to_string("uncompressed")
+    return EthSecp256k1PubKey(key=pubkey_65B).SerializeToString()
+
+
+def _sign_with_private_key(privkey_bytes: bytes, msg: bytes) -> bytes:
+    """对齐 pyinjective PrivateKey.sign(): 使用官方 SDK 的签名流程，100% 兼容"""
+    from pyinjective.wallet import PrivateKey as _OfficialPriv
+    hex_key = privkey_bytes.hex()
+    official_pk = _OfficialPriv.from_hex(hex_key)
+    return official_pk.sign(msg)
 
 
 # ========== LCD 配置 ==========
@@ -59,9 +82,9 @@ def privkey_to_inj_address(privkey_bytes: bytes) -> str:
 NETWORKS = {
     "testnet": {
         "chain_id": "injective-888",
-        "lcd": "https://testnet.lcd.injective.network",
+        "lcd": "https://k8s.testnet.lcd.injective.network",
         "denom": "inj",
-        "gas_price": "500000000",  # 0.5 inj per gas-unit equivalent
+        "gas_price": "500000000",
         "faucet": "https://testnet.faucet.injective.network",
     },
     "mainnet": {
@@ -75,10 +98,10 @@ NETWORKS = {
 
 class InjectiveBroadcaster:
     """
-    Injective 链通用广播器
+    Injective 链通用广播器（完全对齐 pyinjective 官方 SDK 的 Protobuf + 签名语义）
     用法:
         brd = InjectiveBroadcaster("testnet")
-        brd.from_mnemonic("dove topple ... tomato")
+        brd.from_mnemonic("<你的 12 词 BIP-39 助记词>")
         txhash = brd.broadcast_wasm_execute(contract_addr, {"register_copyright": {...}})
     """
 
@@ -151,20 +174,7 @@ class InjectiveBroadcaster:
             await __import__('asyncio').sleep(1.5)
         return None
 
-    # -------- 签名 --------
-    def _sign_bytes(self, tx_bytes: bytes) -> bytes:
-        from ecdsa import SigningKey, SECP256k1
-        from ecdsa.util import sigencode_string_canonize
-        sk = SigningKey.from_string(self.privkey, curve=SECP256k1, hashfunc=hashlib.sha256)
-        # Cosmos 要求 SHA256 + DER/Compact 签名。用 compact (73 bytes 兼容):
-        sig = sk.sign_digest_deterministic(
-            hashlib.sha256(tx_bytes).digest(),
-            sigencode=sigencode_string_canonize,
-            hashfunc=hashlib.sha256,
-        )
-        return sig
-
-    # -------- 构建 + 广播交易 --------
+    # -------- 构建 + 广播交易（完全对齐 pyinjective Transaction + broadcaster） --------
     async def broadcast_wasm_execute(
         self,
         contract_addr: str,
@@ -176,7 +186,7 @@ class InjectiveBroadcaster:
     ) -> Dict[str, Any]:
         """
         广播 MsgExecuteContract
-        :returns: {"txhash": ..., "rawlog": ..., "height": ...(if confirmed)}
+        :returns: {"success": True/False, "txhash": ..., ...}
         """
         if self.privkey is None:
             raise RuntimeError("请先调用 from_mnemonic 或 from_private_key_hex 初始化钱包")
@@ -184,100 +194,89 @@ class InjectiveBroadcaster:
             await self.fetch_account_info()
 
         sender = self.address
-        msg_bytes = json.dumps(execute_msg, separators=(',', ':'), sort_keys=True).encode()
-        msg_b64 = base64.b64encode(msg_bytes).decode()
 
-        msgs = [{
-            "@type": "/cosmwasm.wasm.v1.MsgExecuteContract",
-            "sender": sender,
-            "contract": contract_addr,
-            "msg": msg_b64,
-            "funds": funds or [],
-        }]
+        # 1) 构建 MsgExecuteContract CosmWasm msg（bytes）
+        msg_json_bytes = json.dumps(
+            execute_msg, separators=(',', ':'), sort_keys=True, ensure_ascii=False
+        ).encode('utf-8')
 
-        fee = {
-            "amount": [{"denom": self.cfg["denom"],
-                        "amount": str(int(self.cfg["gas_price"]) * gas)}],
-            "gas_limit": str(gas),
-            "payer": "",
-            "granter": "",
-        }
-
-        # 构造签名用 SignDoc (protobuf 等价 JSON)
-        sign_doc = {
-            "chain_id": self.cfg["chain_id"],
-            "account_number": str(self.account_number),
-            "sequence": str(self.sequence),
-            "auth_info_bytes": base64.b64encode(json.dumps({
-                "signer_infos": [{
-                    "public_key": {
-                        "@type": "/cosmos.crypto.secp256k1.PubKey",
-                        # pubkey will be serialized below
-                        "key": base64.b64encode(self._pubkey_bytes()).decode(),
-                    },
-                    "mode_info": {"single": {"mode": "SIGN_MODE_DIRECT"}},
-                    "sequence": str(self.sequence),
-                }],
-                "fee": {
-                    **fee,
-                    "granter": "",
-                    "payer": "",
-                },
-                "tip": None,
-            }, separators=(',', ':')).encode()).decode(),
-            "tx_body_bytes": base64.b64encode(json.dumps({
-                "messages": msgs,
-                "memo": memo,
-                "timeout_height": "0",
-                "extension_options": [],
-                "non_critical_extension_options": [],
-            }, separators=(',', ':')).encode()).decode(),
-        }
-
-        # SIGN_MODE_DIRECT 签名: sign sha256( auth_info || tx_body )
-        auth_info_raw = base64.b64decode(sign_doc["auth_info_bytes"])
-        tx_body_raw = base64.b64decode(sign_doc["tx_body_bytes"])
-        sign_bytes = hashlib.sha256(auth_info_raw + tx_body_raw).digest()
-
-        from ecdsa import SigningKey, SECP256k1
-        from ecdsa.util import sigencode_string_canonize
-        sk = SigningKey.from_string(self.privkey, curve=SECP256k1, hashfunc=hashlib.sha256)
-        signature = sk.sign_digest_deterministic(
-            sign_bytes,
-            sigencode=sigencode_string_canonize,
-            hashfunc=hashlib.sha256,
+        # 使用 google.protobuf.message.Message + Pack 机制，但因为 pyinjective 未必包含 cosmwasm pb2，
+        # 我们直接按 protobuf 语义手动构造 Any: type_url + SerializeToString()
+        # cosmwasm.wasm.v1.MsgExecuteContract 的字段定义:
+        #   string sender = 1; string contract = 2; bytes msg = 3; repeated Coin funds = 5;
+        from pyinjective.proto.cosmwasm.wasm.v1 import tx_pb2 as _cw_tx
+        exec_pb = _cw_tx.MsgExecuteContract(
+            sender=sender,
+            contract=contract_addr,
+            msg=msg_json_bytes,
+            funds=[Coin(denom=f["denom"], amount=f["amount"]) for f in (funds or [])],
         )
-        sig_b64 = base64.b64encode(signature).decode()
 
-        tx_raw = {
-            "tx_bytes": base64.b64encode(json.dumps({
-                "body": {
-                    "messages": msgs,
-                    "memo": memo,
-                    "timeout_height": "0",
-                    "extension_options": [],
-                    "non_critical_extension_options": [],
-                },
-                "auth_info": {
-                    "signer_infos": [{
-                        "public_key": {
-                            "@type": "/cosmos.crypto.secp256k1.PubKey",
-                            "key": base64.b64encode(self._pubkey_bytes()).decode(),
-                        },
-                        "mode_info": {"single": {"mode": "SIGN_MODE_DIRECT"}},
-                        "sequence": str(self.sequence),
-                    }],
-                    "fee": fee,
-                    "tip": None,
-                },
-                "signatures": [sig_b64],
-            }, separators=(',', ':')).encode()).decode(),
-            "mode": "BROADCAST_MODE_SYNC",
-        }
+        # 2) 把 msg 包成 google.protobuf.Any（与 official Transaction.__convert_msgs 一致）
+        msg_any = any_pb2.Any()
+        msg_any.Pack(exec_pb, type_url_prefix="")
 
+        # 3) 构建 Coin list (fee)
+        fee_denom = self.cfg["denom"]
+        fee_amount = int(self.cfg["gas_price"]) * gas
+        fee_coins = [Coin(denom=fee_denom, amount=str(fee_amount))]
+
+        # 4) 构建 EthSecp256k1 PubKey Any
+        pubkey_proto_bytes = _pubkey_to_ethsecp_proto_bytes(self.privkey)
+        pubkey_any = any_pb2.Any()
+        # type_url 必须与 Pack 时的行为一致: full_name 无斜杠前缀 → Pack("", full) → "/{full_name}"
+        pubkey_any.type_url = "/" + EthSecp256k1PubKey.DESCRIPTOR.full_name
+        pubkey_any.value = pubkey_proto_bytes
+
+        # 5) 构建 ModeInfo/SignerInfo/AuthInfo + Fee + TxBody (同 official transaction.py __generate_info)
+        tx_body = _cosmos_tx.TxBody(
+            messages=[msg_any],
+            memo=memo,
+            timeout_height=0,
+        )
+        body_bytes = tx_body.SerializeToString()
+
+        mode_info = _cosmos_tx.ModeInfo(
+            single=_cosmos_tx.ModeInfo.Single(mode=SIGN_MODE_DIRECT)
+        )
+        signer_info = _cosmos_tx.SignerInfo(
+            public_key=pubkey_any,
+            mode_info=mode_info,
+            sequence=int(self.sequence or 0),
+        )
+        fee_pb = _cosmos_tx.Fee(amount=fee_coins, gas_limit=gas)
+        auth_info = _cosmos_tx.AuthInfo(signer_infos=[signer_info], fee=fee_pb)
+        auth_info_bytes = auth_info.SerializeToString()
+
+        # 6) SignDoc = {body_bytes, auth_info_bytes, chain_id, account_number}
+        #    同 official Transaction.get_sign_doc
+        sign_doc = _cosmos_tx.SignDoc(
+            body_bytes=body_bytes,
+            auth_info_bytes=auth_info_bytes,
+            chain_id=self.cfg["chain_id"],
+            account_number=int(self.account_number or 0),
+        )
+        sign_doc_bytes = sign_doc.SerializeToString()
+
+        # 7) 对齐 pyinjective.broadcaster L386:
+        #    sig = private_key.sign(sign_doc.SerializeToString())
+        signature = _sign_with_private_key(self.privkey, sign_doc_bytes)
+
+        # 8) TxRaw = {body_bytes, auth_info_bytes, [signature]}
+        #    同 official Transaction.get_tx_data
+        tx_raw = _cosmos_tx.TxRaw(
+            body_bytes=body_bytes,
+            auth_info_bytes=auth_info_bytes,
+            signatures=[signature],
+        )
+        tx_raw_bytes = tx_raw.SerializeToString()
+        tx_b64 = base64.b64encode(tx_raw_bytes).decode()
+
+        # 9) POST 到 LCD txs 端点（sync mode）
         url = f"{self.cfg['lcd']}/cosmos/tx/v1beta1/txs"
+        req_body = {"tx_bytes": tx_b64, "mode": "BROADCAST_MODE_SYNC"}
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(url, json=tx_raw)
+            resp = await client.post(url, json=req_body)
             body = resp.json()
 
         if "tx_response" in body:
@@ -289,7 +288,7 @@ class InjectiveBroadcaster:
                         "txhash": txhash}
             result = {"success": True, "txhash": txhash, "rawlog": txresp.get("raw_log", "")}
             # 自增 sequence，连续广播不回查
-            self.sequence += 1
+            self.sequence = (self.sequence or 0) + 1
             if wait_confirm:
                 confirmed = await self.query_tx(txhash)
                 if confirmed:
@@ -299,11 +298,6 @@ class InjectiveBroadcaster:
                     result["code"] = confirmed.get("code")
             return result
         return {"success": False, "error": body}
-
-    def _pubkey_bytes(self) -> bytes:
-        from ecdsa import SigningKey, SECP256k1
-        sk = SigningKey.from_string(self.privkey, curve=SECP256k1)
-        return sk.get_verifying_key().to_string("compressed")
 
 
 # 便捷函数: 导出合约接口给上层用
